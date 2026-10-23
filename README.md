@@ -22,7 +22,20 @@ It works offline once it has loaded.
 
 ## Your data
 
-Everything is saved in your phone's browser. Nothing is sent anywhere, and there are no accounts. Use **Settings → Save backup** now and then. If you change phones or clear your browser, restore from that file.
+The phone is always the working copy, so the app works offline and without an account.
+
+- **Signed out:** everything is saved in your phone's browser and nothing is sent anywhere. Use **Settings → Save backup** now and then.
+- **Signed in** (Settings → Account, with a 6-digit code sent by email): your data is also synced to your account, so it follows you to other devices and survives a lost phone. Each person can only read and change their own data, which is enforced by the database's row-level security. If two devices have different changes, the most recent one wins.
+- **Signing out** removes the data from that phone. It stays in your account.
+
+## Setting up sign-in (one time, for whoever hosts the app)
+
+1. Create a free project at [supabase.com](https://supabase.com).
+2. **SQL Editor → New query:** paste [`supabase/setup.sql`](supabase/setup.sql) and run it.
+3. **Authentication → Email Templates → Magic Link:** replace the body with a message that shows the code, for example `<p>Your Muraja'ah sign-in code is <strong>{{ .Token }}</strong></p>`. The app signs in with a typed code rather than a link, because on iPhone a link opens in Safari instead of the home-screen app.
+4. **Project Settings → API:** copy the Project URL and the publishable (anon) key into [`config.js`](config.js). This key is designed to be public; row-level security protects the data. Never put the `service_role` or secret key here.
+
+Supabase's built-in email sender only sends a few emails an hour. Before opening sign-in to more than a handful of people, add your own SMTP provider under Authentication → SMTP Settings.
 
 ## Credit
 
@@ -30,4 +43,4 @@ The revision method was taught by Mohammad's Quran teacher. The app was built by
 
 ## Development
 
-A static site with no build step: `index.html`, `sw.js` (offline cache) and `manifest.webmanifest`. It is served with GitHub Pages from the `main` branch.
+A static site with no build step: `index.html`, `config.js` (sign-in settings), `sw.js` (offline cache), `manifest.webmanifest` and `supabase/setup.sql`. It is served with GitHub Pages from the `main` branch. Sign-in uses [supabase-js](https://github.com/supabase/supabase-js) 2.45.4 from jsDelivr.

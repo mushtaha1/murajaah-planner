@@ -165,6 +165,8 @@ nav.tabs button.on{color:var(--accent)}
 <nav class="tabs" aria-label="Sections"><div class="in" id="tabs"></div></nav>
 <div id="overlay"></div>
 
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 <script>
 (function(){
 "use strict";
@@ -242,8 +244,113 @@ function commit(msg,undo){prune();S.rev=Date.now()+"-"+Math.random().toString(36
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}}
 function loadLocal(){try{const r=localStorage.getItem(LS);if(r){const d=JSON.parse(r);if(d&&d.v===1)return d}}catch(e){}return null}
 function normalise(d){const s=fresh();Object.assign(s,d);s.settings=Object.assign(JSON.parse(JSON.stringify(DEFAULTS)),d.settings||{});s.q=d.q||{};s.logs=d.logs||{};return s}
-function save(){saveLocal()}
+function save(){saveLocal();schedulePush()}
 function setSync(t){$("#sync").textContent=t}
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+
+/* ---------- account + sync (Supabase) ----------
+   The phone stays the working copy, so the app works offline and signed out.
+   When signed in, the whole state is mirrored to one row per user; the newer copy wins. */
+const CFG=window.MURAJAAH_CONFIG||{};
+const TABLE="revision_state";
+let sb=null,session=null,pending=false,pushing=false,pushT=null,lastSync=null,delArm=false;
+const auth={step:"email",email:"",busy:false,msg:""};
+const tsOf=s=>parseInt((s&&s.rev)||"0",10)||0;
+const hasData=s=>!!s&&Object.keys(s.q||{}).length>0;
+const syncReady=()=>!!(CFG.supabaseUrl&&CFG.supabaseKey);
+function initSync(){
+  if(!syncReady()||!window.supabase)return;
+  sb=window.supabase.createClient(CFG.supabaseUrl,CFG.supabaseKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,storageKey:"murajaah.auth"}});
+  sb.auth.onAuthStateChange((ev,s)=>{
+    const was=session;session=s||null;
+    if(session&&!was)setTimeout(pull,0);
+    updateSync();if(tab==="settings")render();
+  });
+  window.addEventListener("online",()=>{if(pending)push();else pull()});
+  window.addEventListener("offline",updateSync);
+}
+function updateSync(){
+  if(!session){setSync("Saved on this phone");return}
+  setSync(!navigator.onLine?"Offline · will sync":pushing?"Syncing…":pending?"Not synced yet":"Synced");
+}
+async function pull(){
+  if(!sb||!session||pushing)return;
+  const {data,error}=await sb.from(TABLE).select("data").eq("user_id",session.user.id).maybeSingle();
+  if(error){updateSync();return}
+  if(!data){if(hasData(S)&&!S.example)push();else{lastSync=Date.now();updateSync()}return}
+  const remote=normalise(data.data);
+  if(!hasData(S)||S.example){S=remote;saveLocal();render()}
+  else if(tsOf(remote)>tsOf(S)&&!pending){
+    if(S.rev!==remote.rev){try{localStorage.setItem(LS+".before-sync",JSON.stringify(S))}catch(e){}}
+    S=remote;saveLocal();render();
+  }
+  else if(tsOf(S)>tsOf(remote)){push();return}
+  lastSync=Date.now();updateSync();
+}
+function schedulePush(){if(!sb||!session)return;pending=true;updateSync();clearTimeout(pushT);pushT=setTimeout(push,1200)}
+async function push(){
+  if(!sb||!session||pushing)return;
+  if(!navigator.onLine){pending=true;updateSync();return}
+  clearTimeout(pushT);pushing=true;pending=false;updateSync();
+  const {error}=await sb.from(TABLE).upsert({user_id:session.user.id,data:JSON.parse(JSON.stringify(S)),updated_at:new Date().toISOString()});
+  pushing=false;
+  if(error)pending=true;else lastSync=Date.now();
+  updateSync();if(tab==="settings")render();
+  if(pending&&!error)push();
+}
+async function sendCode(){
+  const email=($("#authEmail")||{}).value?$("#authEmail").value.trim():auth.email.trim();
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){auth.msg="Enter a valid email address.";render();return}
+  auth.email=email;auth.busy=true;auth.msg="";render();
+  const {error}=await sb.auth.signInWithOtp({email,options:{shouldCreateUser:true}});
+  auth.busy=false;
+  if(error)auth.msg=/rate|seconds|too many/i.test(error.message)?"Too many codes requested. Wait a minute and try again.":"Couldn't send the code: "+error.message;
+  else{auth.step="code";auth.msg=""}
+  render();
+}
+async function verifyCode(){
+  const token=(($("#authCode")||{}).value||"").replace(/\D/g,"");
+  if(token.length<6){auth.msg="Enter the code from the email.";render();return}
+  auth.busy=true;auth.msg="";render();
+  const {error}=await sb.auth.verifyOtp({email:auth.email,token,type:"email"});
+  auth.busy=false;
+  if(error){auth.msg="That code didn't work. Check it, or request a new one.";render();return}
+  auth.step="email";toast("Signed in");
+}
+async function signOut(){
+  if(pending){await push();if(pending){toast("You have changes that haven't synced yet. Connect to the internet, then sign out.");return}}
+  await sb.auth.signOut();session=null;
+  S=fresh();saveLocal();updateSync();render();toast("Signed out. Your data is saved in your account.");
+}
+async function deleteSynced(){
+  delArm=false;
+  const {error}=await sb.from(TABLE).delete().eq("user_id",session.user.id);
+  if(error){toast("Couldn't delete it: "+error.message);return}
+  await sb.auth.signOut();session=null;updateSync();render();toast("Synced copy deleted. Your data is still on this phone.");
+}
+function accountSection(){
+  let h='<section class="sec"><h2>Account</h2>';
+  if(!syncReady())return h+'<div class="note">Sign-in is not set up on this copy of the app yet. Everything is saved on this phone.</div></section>';
+  if(!sb)return h+'<div class="note">Sign-in needs an internet connection the first time. Your data is saved on this phone in the meantime.</div></section>';
+  if(session){
+    h+='<div class="form"><div class="field"><label>Signed in as<small>'+esc(session.user.email||"")+'</small></label><span class="chip">'+esc($("#sync").textContent)+'</span></div>'+
+      '<div class="field"><label>Last synced<small>'+(lastSync?new Date(lastSync).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"not yet")+'</small></label><button class="btn ghost" data-act="syncnow">Sync now</button></div></div>'+
+      '<div class="row"><button class="btn ghost" data-act="signout">Sign out</button>'+
+      (delArm?'<button class="btn danger" data-act="delsync">Yes, delete synced copy</button><button class="btn ghost" data-act="delno">Cancel</button>':'<button class="link" data-act="delarm">Delete my synced data</button>')+'</div>'+
+      '<div class="note">Signing out removes the data from this phone. It stays in your account for next time.</div>';
+    return h+'</section>';
+  }
+  h+='<div class="note">Sign in to sync across your devices and keep your progress safe if you lose your phone. You can keep using the app without an account.</div>';
+  if(auth.step==="code"){
+    h+='<div class="form"><div class="field"><label for="authCode">Code<small>Sent to '+esc(auth.email)+'</small></label><input id="authCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" style="width:120px;padding:8px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;text-align:center;letter-spacing:2px"></div></div>'+
+      '<div class="row"><button class="btn" data-act="verify"'+(auth.busy?" disabled":"")+'>'+(auth.busy?"Checking…":"Sign in")+'</button><button class="btn ghost" data-act="authback">Use a different email</button></div>';
+  }else{
+    h+='<div class="form"><div class="field" style="flex-wrap:wrap"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="email" inputmode="email" value="'+esc(auth.email)+'" placeholder="you@example.com" style="flex:1;min-width:0;padding:8px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit"></div></div>'+
+      '<div class="row"><button class="btn" data-act="sendcode"'+(auth.busy?" disabled":"")+'>'+(auth.busy?"Sending…":"Email me a sign-in code")+'</button></div>';
+  }
+  if(auth.msg)h+='<div class="note" style="color:var(--r)">'+esc(auth.msg)+'</div>';
+  return h+'</section>';
+}
 function showBanner(t){$("#banner").innerHTML=t?'<div class="banner">'+t+'</div>':""}
 function connect(){
   const local=loadLocal();if(local){S=normalise(local);render()}
@@ -251,6 +358,7 @@ function connect(){
   catch(e){showBanner("This browser is not letting the app save (private browsing?). Open it in a normal window or add it to your home screen.")}
   try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist()}catch(e){}
   if("serviceWorker" in navigator&&location.protocol.startsWith("http")){navigator.serviceWorker.register("sw.js").catch(()=>{})}
+  initSync();
 }
 async function exportBackup(){
   const name="murajaah-backup-"+today()+".json";
@@ -406,7 +514,7 @@ function viewHistory(){
 function num(id,lab,val,sub){return '<div class="field"><label for="'+id+'">'+lab+(sub?'<small>'+sub+'</small>':"")+'</label><input type="number" inputmode="numeric" min="0" id="'+id+'" data-set="'+id+'" value="'+(val==null?"":val)+'" placeholder="–"></div>'}
 function viewSettings(){
   const s=ST();
-  let h='<section class="sec"><h2>Minutes per quarter</h2><div class="form">'+
+  let h=accountSection()+'<section class="sec"><h2>Minutes per quarter</h2><div class="form">'+
     num("redMin","Red",s.redMin,"Time one red quarter, e.g. Tawbah")+num("yelMin","Yellow",s.yelMin,"Your estimate: about 15 (Hud)")+num("grnMin","Green",s.grnMin,"Your estimate: about 5 (Baqarah)")+num("avail","Time you have per day",s.avail,"Optional")+'</div></section>';
   h+='<section class="sec"><h2>Weekday plan</h2><div class="form">'+num("wd.R","Reds",s.wd.R)+num("wd.Y","Yellows",s.wd.Y)+num("wd.G","Greens",s.wd.G)+'</div><div class="note">Starting values. Agree the real numbers with your teacher.</div></section>';
   h+='<section class="sec"><h2>Weekend plan</h2><div class="form">'+num("we.R","Reds",s.we.R)+num("we.Y","Yellows",s.we.Y)+num("we.G","Greens",s.we.G,"Teacher: none at the weekend")+num("we.B","Locked blocks",s.we.B,"5 juz each, once you have one")+
@@ -418,9 +526,10 @@ function viewSettings(){
     '<span>When all 20 quarters in a 5-juz block are green, the block locks and is revised whole at the weekend.</span>'+
     '<span>New memorisation: once you have read it to your teacher, colour it green on Quarters.</span></div></section>';
   h+='<div class="note" style="text-align:center;padding-top:6px">Method taught by Mohammad\'s Quran teacher. Built by Mohammad Mushtaha.</div>';
-  h+='<section class="sec"><h2>Backup</h2><div class="note">Your revision data lives only on this phone. Save a backup now and then (to Files, iCloud Drive or WhatsApp) so a lost or reset phone does not lose your progress.</div>'+
+  h+='<section class="sec"><h2>Backup</h2><div class="note">'+(session?"Your data is synced to your account. A backup file is an extra copy you control.":"Your revision data lives only on this phone. Save a backup now and then (to Files, iCloud Drive or WhatsApp), or sign in, so a lost or reset phone does not lose your progress.")+'</div>'+
     '<div class="row"><button class="btn" data-act="export">Save backup</button><button class="btn ghost" data-act="import">Restore backup</button><input type="file" id="importFile" accept="application/json,.json" hidden></div></section>';
   h+='<section class="sec"><h2>Data</h2><div class="row">'+(resetArm?'<button class="btn danger" data-act="reset">Yes, erase everything</button><button class="btn ghost" data-act="resetno">Keep my data</button>':'<button class="btn ghost" data-act="resetarm">Reset all data</button>')+'</div>'+
+    (resetArm&&session?'<div class="note" style="color:var(--r)">You are signed in, so this also erases it from your account and every device.</div>':"")+
     (S.example?'<div class="note">You are looking at example data. Reset to start with your own.</div>':"")+'</section>';
   return h;
 }
@@ -489,6 +598,14 @@ document.addEventListener("click",ev=>{
       try{navigator.clipboard.writeText(txt).then(()=>toast("Summary copied"),fallback)}catch(e){fallback()}}break;
     case "export":exportBackup();break;
     case "import":$("#importFile").click();break;
+    case "sendcode":sendCode();break;
+    case "verify":verifyCode();break;
+    case "authback":auth.step="email";auth.msg="";render();break;
+    case "signout":signOut();break;
+    case "syncnow":if(pending)push();else pull();break;
+    case "delarm":delArm=true;render();break;
+    case "delno":delArm=false;render();break;
+    case "delsync":deleteSynced();break;
     case "resetarm":resetArm=true;render();break;
     case "resetno":resetArm=false;render();break;
     case "reset":resetArm=false;{const keep=S.settings;S=fresh();if(!S.example)S.settings=keep;}commit("All data erased");break;
@@ -501,6 +618,7 @@ function paintCell(i,c){
 }
 let setT=null;
 document.addEventListener("input",ev=>{
+  if(ev.target.id==="authEmail"){auth.email=ev.target.value;return}
   const k=ev.target.dataset.set;if(!k)return;
   const raw=ev.target.value.trim();const val=raw===""?null:Math.max(0,Number(raw));
   if(raw!==""&&!isFinite(val))return;
@@ -509,7 +627,8 @@ document.addEventListener("input",ev=>{
   clearTimeout(setT);setT=setTimeout(()=>{prune();S.rev=Date.now()+"-"+Math.random().toString(36).slice(2,7);save()},600);
 });
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sheet!=null){sheet=null;renderOverlay()}});
-document.addEventListener("visibilitychange",()=>{if(!document.hidden)render()});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden){render();if(session&&!pending)pull()}});
+document.addEventListener("keydown",e=>{if(e.key!=="Enter")return;if(e.target.id==="authEmail")sendCode();else if(e.target.id==="authCode")verifyCode()});
 
 render();connect();
 })();
