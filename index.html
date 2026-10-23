@@ -136,6 +136,7 @@ textarea.copy{width:100%;min-height:150px;border-radius:10px;border:1px solid va
 .days button{width:34px;height:34px;border-radius:9px;border:1.5px solid var(--line);background:transparent;font-size:12px;font-weight:600}
 .days button.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .note{font-size:12.5px;color:var(--muted)}
+.inp{flex:1;min-width:0;max-width:240px;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit}
 
 /* Sheet */
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:30}
@@ -254,15 +255,21 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"
 const CFG=window.MURAJAAH_CONFIG||{};
 const TABLE="revision_state";
 let sb=null,session=null,pending=false,pushing=false,pushT=null,lastSync=null,delArm=false;
-const auth={step:"email",email:"",busy:false,msg:""};
+const auth={mode:"signin",email:"",busy:false,msg:"",info:""};
+const APP_URL=location.origin+location.pathname;
 const tsOf=s=>parseInt((s&&s.rev)||"0",10)||0;
 const hasData=s=>!!s&&Object.keys(s.q||{}).length>0;
 const syncReady=()=>!!(CFG.supabaseUrl&&CFG.supabaseKey);
 function initSync(){
   if(!syncReady()||!window.supabase)return;
-  sb=window.supabase.createClient(CFG.supabaseUrl,CFG.supabaseKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,storageKey:"murajaah.auth"}});
+  sb=window.supabase.createClient(CFG.supabaseUrl,CFG.supabaseKey,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,storageKey:"murajaah.auth"}});
   sb.auth.onAuthStateChange((ev,s)=>{
     const was=session;session=s||null;
+    if(ev==="PASSWORD_RECOVERY"){auth.mode="newpass";auth.msg="";auth.info="";tab="settings";render()}
+    if(location.hash.includes("access_token")||location.hash.includes("error_description")){
+      if(location.hash.includes("error_description"))auth.msg="That link has expired or was already used. Request a new one.";
+      history.replaceState(null,"",APP_URL);
+    }
     if(session&&!was)setTimeout(pull,0);
     updateSync();if(tab==="settings")render();
   });
@@ -298,25 +305,25 @@ async function push(){
   updateSync();if(tab==="settings")render();
   if(pending&&!error)push();
 }
-async function sendCode(){
-  const email=($("#authEmail")||{}).value?$("#authEmail").value.trim():auth.email.trim();
-  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){auth.msg="Enter a valid email address.";render();return}
-  auth.email=email;auth.busy=true;auth.msg="";render();
-  const {error}=await sb.auth.signInWithOtp({email,options:{shouldCreateUser:true}});
-  auth.busy=false;
-  if(error)auth.msg=/rate|seconds|too many/i.test(error.message)?"Too many codes requested. Wait a minute and try again.":"Couldn't send the code: "+error.message;
-  else{auth.step="code";auth.msg=""}
-  render();
-}
-async function verifyCode(){
-  const token=(($("#authCode")||{}).value||"").replace(/\D/g,"");
-  if(token.length<6){auth.msg="Enter the code from the email.";render();return}
-  auth.busy=true;auth.msg="";render();
-  const {error}=await sb.auth.verifyOtp({email:auth.email,token,type:"email"});
-  auth.busy=false;
-  if(error){auth.msg="That code didn't work. Check it, or request a new one.";render();return}
-  auth.step="email";toast("Signed in");
-}
+const val=id=>(($("#"+id)||{}).value||"");
+const authErr=m=>/invalid login/i.test(m)?"Wrong email or password.":/not confirmed/i.test(m)?"Confirm your email first: open the link we sent you, then sign in here.":/rate|seconds|too many/i.test(m)?"Too many attempts. Wait a few minutes and try again.":/at least|weak|password should/i.test(m)?"Use a longer password (at least 8 characters).":m;
+async function authRun(fn){auth.busy=true;auth.msg="";auth.info="";render();try{await fn()}catch(e){auth.msg=authErr((e&&e.message)||"Something went wrong. Check your connection.")}auth.busy=false;render()}
+function emailOk(){const e=val("authEmail").trim()||auth.email.trim();auth.email=e;if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)){auth.msg="Enter a valid email address.";render();return null}return e}
+function signIn(){const email=emailOk();if(!email)return;const password=val("authPass");
+  if(!password){auth.msg="Enter your password.";render();return}
+  authRun(async()=>{const {error}=await sb.auth.signInWithPassword({email,password});if(error)throw error;toast("Signed in")})}
+function signUp(){const email=emailOk();if(!email)return;const password=val("authPass");
+  if(password.length<8){auth.msg="Use a password of at least 8 characters.";render();return}
+  if(password!==val("authPass2")){auth.msg="The two passwords don't match.";render();return}
+  authRun(async()=>{const {data,error}=await sb.auth.signUp({email,password,options:{emailRedirectTo:APP_URL}});if(error)throw error;
+    if(!data.session){auth.mode="signin";auth.info="Check your email for a link to confirm your address. Once you've tapped it, come back here and sign in."}})}
+function forgot(){const email=emailOk();if(!email)return;
+  authRun(async()=>{const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:APP_URL});if(error)throw error;
+    auth.mode="signin";auth.info="If that email has an account, we've sent a link to reset the password. It opens the app in your browser, where you set a new one."})}
+function setNewPass(){const password=val("authPass");
+  if(password.length<8){auth.msg="Use a password of at least 8 characters.";render();return}
+  if(password!==val("authPass2")){auth.msg="The two passwords don't match.";render();return}
+  authRun(async()=>{const {error}=await sb.auth.updateUser({password});if(error)throw error;auth.mode="signin";toast("Password updated")})}
 async function signOut(){
   if(pending){await push();if(pending){toast("You have changes that haven't synced yet. Connect to the internet, then sign out.");return}}
   await sb.auth.signOut();session=null;
@@ -340,14 +347,19 @@ function accountSection(){
       '<div class="note">Signing out removes the data from this phone. It stays in your account for next time.</div>';
     return h+'</section>';
   }
-  h+='<div class="note">Sign in to sync across your devices and keep your progress safe if you lose your phone. You can keep using the app without an account.</div>';
-  if(auth.step==="code"){
-    h+='<div class="form"><div class="field"><label for="authCode">Code<small>Sent to '+esc(auth.email)+'</small></label><input id="authCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" style="width:120px;padding:8px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;text-align:center;letter-spacing:2px"></div></div>'+
-      '<div class="row"><button class="btn" data-act="verify"'+(auth.busy?" disabled":"")+'>'+(auth.busy?"Checking…":"Sign in")+'</button><button class="btn ghost" data-act="authback">Use a different email</button></div>';
+  const inp=(id,type,lab,ac,v)=>'<div class="field"><label for="'+id+'">'+lab+'</label><input class="inp" id="'+id+'" type="'+type+'" autocomplete="'+ac+'"'+(type==="email"?' inputmode="email" placeholder="you@example.com"':"")+' value="'+esc(v||"")+'"></div>';
+  const btn=(act,label,busyLabel)=>'<button class="btn" data-act="'+act+'"'+(auth.busy?" disabled":"")+'>'+(auth.busy?busyLabel:label)+'</button>';
+  const m=auth.mode;
+  if(m==="newpass"){
+    h+='<div class="note">Choose a new password for your account.</div><div class="form">'+inp("authPass","password","New password","new-password")+inp("authPass2","password","Repeat it","new-password")+'</div><div class="row">'+btn("setpass","Save new password","Saving…")+'</div>';
   }else{
-    h+='<div class="form"><div class="field" style="flex-wrap:wrap"><label for="authEmail">Email</label><input id="authEmail" type="email" autocomplete="email" inputmode="email" value="'+esc(auth.email)+'" placeholder="you@example.com" style="flex:1;min-width:0;padding:8px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit"></div></div>'+
-      '<div class="row"><button class="btn" data-act="sendcode"'+(auth.busy?" disabled":"")+'>'+(auth.busy?"Sending…":"Email me a sign-in code")+'</button></div>';
+    h+='<div class="note">'+(m==="signup"?"Create an account to sync across your devices and keep your progress safe if you lose your phone.":m==="forgot"?"Enter your email and we'll send a link to reset your password.":"Sign in to sync across your devices and keep your progress safe if you lose your phone. You can keep using the app without an account.")+'</div>';
+    h+='<div class="form">'+inp("authEmail","email","Email","email",auth.email)+(m!=="forgot"?inp("authPass","password","Password",m==="signup"?"new-password":"current-password"):"")+(m==="signup"?inp("authPass2","password","Repeat password","new-password"):"")+'</div>';
+    if(m==="signin")h+='<div class="row">'+btn("signin","Sign in","Signing in…")+'<button class="btn ghost" data-act="mode" data-v="signup">Create account</button></div><div class="row"><button class="link" data-act="mode" data-v="forgot">Forgot password?</button></div>';
+    if(m==="signup")h+='<div class="row">'+btn("signup","Create account","Creating…")+'<button class="btn ghost" data-act="mode" data-v="signin">I have an account</button></div>';
+    if(m==="forgot")h+='<div class="row">'+btn("forgot","Send reset link","Sending…")+'<button class="btn ghost" data-act="mode" data-v="signin">Back</button></div>';
   }
+  if(auth.info)h+='<div class="banner">'+esc(auth.info)+'</div>';
   if(auth.msg)h+='<div class="note" style="color:var(--r)">'+esc(auth.msg)+'</div>';
   return h+'</section>';
 }
@@ -598,9 +610,11 @@ document.addEventListener("click",ev=>{
       try{navigator.clipboard.writeText(txt).then(()=>toast("Summary copied"),fallback)}catch(e){fallback()}}break;
     case "export":exportBackup();break;
     case "import":$("#importFile").click();break;
-    case "sendcode":sendCode();break;
-    case "verify":verifyCode();break;
-    case "authback":auth.step="email";auth.msg="";render();break;
+    case "signin":signIn();break;
+    case "signup":signUp();break;
+    case "forgot":forgot();break;
+    case "setpass":setNewPass();break;
+    case "mode":auth.mode=v;auth.msg="";auth.info="";render();break;
     case "signout":signOut();break;
     case "syncnow":if(pending)push();else pull();break;
     case "delarm":delArm=true;render();break;
@@ -628,7 +642,7 @@ document.addEventListener("input",ev=>{
 });
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sheet!=null){sheet=null;renderOverlay()}});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden){render();if(session&&!pending)pull()}});
-document.addEventListener("keydown",e=>{if(e.key!=="Enter")return;if(e.target.id==="authEmail")sendCode();else if(e.target.id==="authCode")verifyCode()});
+document.addEventListener("keydown",e=>{if(e.key!=="Enter"||!/^auth/.test(e.target.id))return;const m=auth.mode;if(m==="newpass")setNewPass();else if(m==="signup")signUp();else if(m==="forgot")forgot();else signIn()});
 
 render();connect();
 })();
