@@ -255,7 +255,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"
 const CFG=window.MURAJAAH_CONFIG||{};
 const TABLE="revision_state";
 let sb=null,session=null,pending=false,pushing=false,pushT=null,lastSync=null,delArm=false;
-const auth={mode:"signin",email:"",busy:false,msg:"",info:""};
+const auth={mode:"signin",email:"",busy:false,msg:"",info:"",unconfirmed:false};
 const APP_URL=location.origin+location.pathname;
 const tsOf=s=>parseInt((s&&s.rev)||"0",10)||0;
 const hasData=s=>!!s&&Object.keys(s.q||{}).length>0;
@@ -307,7 +307,7 @@ async function push(){
 }
 const val=id=>(($("#"+id)||{}).value||"");
 const authErr=m=>/invalid login/i.test(m)?"Wrong email or password.":/not confirmed/i.test(m)?"Confirm your email first: open the link we sent you, then sign in here.":/rate|seconds|too many/i.test(m)?"Too many attempts. Wait a few minutes and try again.":/at least|weak|password should/i.test(m)?"Use a longer password (at least 8 characters).":m;
-async function authRun(fn){auth.busy=true;auth.msg="";auth.info="";render();try{await fn()}catch(e){auth.msg=authErr((e&&e.message)||"Something went wrong. Check your connection.")}auth.busy=false;render()}
+async function authRun(fn){auth.busy=true;auth.msg="";auth.info="";auth.unconfirmed=false;render();try{await fn()}catch(e){const m=(e&&e.message)||"Something went wrong. Check your connection.";auth.unconfirmed=/not confirmed/i.test(m);auth.msg=authErr(m)}auth.busy=false;render()}
 function emailOk(){const e=val("authEmail").trim()||auth.email.trim();auth.email=e;if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)){auth.msg="Enter a valid email address.";render();return null}return e}
 function signIn(){const email=emailOk();if(!email)return;const password=val("authPass");
   if(!password){auth.msg="Enter your password.";render();return}
@@ -320,6 +320,9 @@ function signUp(){const email=emailOk();if(!email)return;const password=val("aut
 function forgot(){const email=emailOk();if(!email)return;
   authRun(async()=>{const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:APP_URL});if(error)throw error;
     auth.mode="signin";auth.info="If that email has an account, we've sent a link to reset the password. It opens the app in your browser, where you set a new one."})}
+function resendConfirm(){const email=emailOk();if(!email)return;
+  authRun(async()=>{const {error}=await sb.auth.resend({type:"signup",email,options:{emailRedirectTo:APP_URL}});if(error)throw error;
+    auth.info="Sent. Open the new email and tap the link, then sign in here."})}
 function setNewPass(){const password=val("authPass");
   if(password.length<8){auth.msg="Use a password of at least 8 characters.";render();return}
   if(password!==val("authPass2")){auth.msg="The two passwords don't match.";render();return}
@@ -359,6 +362,7 @@ function accountSection(){
     if(m==="signup")h+='<div class="row">'+btn("signup","Create account","Creating…")+'<button class="btn ghost" data-act="mode" data-v="signin">I have an account</button></div>';
     if(m==="forgot")h+='<div class="row">'+btn("forgot","Send reset link","Sending…")+'<button class="btn ghost" data-act="mode" data-v="signin">Back</button></div>';
   }
+  if(auth.unconfirmed&&auth.mode==="signin")h+='<div class="row"><button class="btn ghost" data-act="resend">Resend confirmation email</button></div>';
   if(auth.info)h+='<div class="banner">'+esc(auth.info)+'</div>';
   if(auth.msg)h+='<div class="note" style="color:var(--r)">'+esc(auth.msg)+'</div>';
   return h+'</section>';
@@ -614,6 +618,7 @@ document.addEventListener("click",ev=>{
     case "signup":signUp();break;
     case "forgot":forgot();break;
     case "setpass":setNewPass();break;
+    case "resend":resendConfirm();break;
     case "mode":auth.mode=v;auth.msg="";auth.info="";render();break;
     case "signout":signOut();break;
     case "syncnow":if(pending)push();else pull();break;
