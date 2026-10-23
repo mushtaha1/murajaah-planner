@@ -3,6 +3,6 @@
 // designed to be public; row-level security (supabase/setup.sql) keeps each
 // person's data private to them.
 window.MURAJAAH_CONFIG = {
-  supabaseUrl: "",
-  supabaseKey: ""
+  supabaseUrl: "https://evhtufkqzcmzimrvrujq.supabase.co",
+  supabaseKey: "sb_publishable_OL6jrbGMYDkPwPdgWkpk0w_u7YI17yU"
 };
